@@ -23,12 +23,26 @@
 
 /**
  * @class GstCameraPlugin
- * A Gazebo plugin that can be attached to a camera and then streams the video data using gstreamer.
- * It streams to a configurable UDP IP and UDP Port, defaults are respectively 127.0.0.1 and 5600.
- * IP and Port can be configured in the SDF as well as by GZ_VIDEO_HOST_IP and GZ_VIDEO_HOST_PORT env variables
  *
- * Connect to the stream via command line with:
- gst-launch-1.0  -v udpsrc port=5600 caps='application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264' ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink sync=false
+ * A Gazebo plugin that can be attached to a camera and then streams the
+ * video data using gstreamer.
+ *
+ * Parameters
+ *  <udp_host>            the UDP host IP, defaults to 127.0.0.1
+ *  <udp_port>            the UDP port, defaults to 5600
+ *  <rtmp_location>       the RTMP location
+ *  <use_basic_pipeline>  set to true if not using <rtmp_location>
+ *  <use_cuda>            set to true to use CUDA (if available)
+ *  <image_topic>         the camera image topic
+ *  <enable_topic>        the topic to enable / disable video streaming
+ *
+ * Start streaming (assumes: <enable_topic>/enable_video<enable_topic>)
+ *
+ * gz topic -t "/enable_video" -m gz.msgs.Boolean -p "data: 1"
+ *
+ * Connect to the stream via command line and open an OpenGL window:
+ *
+ *  gst-launch-1.0 -v udpsrc port=5600 caps='application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264' ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink sync=false
  */
 namespace gz {
 namespace sim {
@@ -57,11 +71,11 @@ class GstCameraPlugin :
                          EntityComponentManager &_ecm,
                          EventManager &) final;
 
-    /// \internal
+  /// \internal
   /// \brief Private implementation
   private: class Impl;
   private: std::unique_ptr<Impl> impl;
-};     
+};
 
 } // namespace systems
 }
