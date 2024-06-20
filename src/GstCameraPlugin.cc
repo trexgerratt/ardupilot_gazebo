@@ -17,6 +17,10 @@
 
 #include "GstCameraPlugin.hh"
 
+#include <iostream>
+#include <string>
+#include <thread>
+
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 
@@ -31,10 +35,8 @@
 #include <gz/sim/components/Sensor.hh>
 #include <gz/sim/rendering/Events.hh>
 #include <gz/transport/Node.hh>
-#include <iostream>
+
 #include <opencv2/opencv.hpp>
-#include <string>
-#include <thread>
 
 namespace gz {
 namespace sim {
@@ -57,18 +59,20 @@ class GstCameraPlugin::Impl {
     void stopStreaming();
     void stopGstThread();
 
-    std::string udpHost;
-    int udpPort;
-    bool useRtmpPipeline = false;
+    std::string udpHost{"127.0.0.1"};
+    int udpPort{5600};
+    bool useRtmpPipeline{false};
     std::string rtmpLocation;
-    bool useBasicPipeline = false;
-    bool useCuda;
+    bool useBasicPipeline{false};
+    bool useCuda{false};
     std::string imageTopic;
     std::string enableTopic;
 
-    unsigned int width = 0;
-    unsigned int height = 0;
-    float rate = 5; // unused by actual pipeline since it's based on the gazebo topic rate?
+    unsigned int width{0};
+    unsigned int height{0};
+
+    // Unused by actual pipeline since it's based on the gazebo topic rate?
+    float rate{5};
 
     pthread_t threadId;
     bool isGstMainLoopActive = false;
@@ -88,11 +92,14 @@ class GstCameraPlugin::Impl {
     std::vector<common::ConnectionPtr> connections;
     transport::Node node;
 
-    bool SensorValid(const EntityComponentManager &_ecm) const {
+    bool SensorValid(const EntityComponentManager &_ecm) const
+    {
         return nullptr != _ecm.Component<components::Sensor>(parentSensor);
     }
 
-    std::optional<std::string> SensorName(const EntityComponentManager &_ecm) const {
+    std::optional<std::string> SensorName(
+        const EntityComponentManager &_ecm) const
+    {
         return _ecm.ComponentData<components::Name>(parentSensor);
     }
 };
@@ -100,10 +107,12 @@ class GstCameraPlugin::Impl {
 //////////////////////////////////////////////////
 
 GstCameraPlugin::GstCameraPlugin()
-    : impl(std::make_unique<GstCameraPlugin::Impl>()) {
+    : impl(std::make_unique<GstCameraPlugin::Impl>())
+{
 }
 
-GstCameraPlugin::~GstCameraPlugin() {
+GstCameraPlugin::~GstCameraPlugin()
+{
     impl->OnRenderTeardown();
 }
 
@@ -111,168 +120,197 @@ void GstCameraPlugin::Configure(
     const Entity &_entity,
     const std::shared_ptr<const sdf::Element> &_sdf,
     EntityComponentManager &_ecm,
-    EventManager &_eventMgr) {
+    EventManager &_eventMgr)
+{
     impl->parentSensor = _entity;
-    if (!impl->SensorValid(_ecm)) {
+    if (!impl->SensorValid(_ecm))
+    {
         gzerr << "GstCameraPlugin must be attached to a camera sensor. "
                  "Failed to initialize"
               << std::endl;
         return;
     }
 
-    if (auto maybeName = impl->SensorName(_ecm)) {
-        gzwarn << "GstCameraPlugin attached to sensor ["
-               << maybeName.value() << "]" << std::endl;
-    } else {
+    if (auto maybeName = impl->SensorName(_ecm))
+    {
+        gzmsg << "GstCameraPlugin attached to sensor ["
+              << maybeName.value() << "]" << std::endl;
+    }
+    else
+    {
         gzerr << "Camera sensor has invalid name" << std::endl;
         return;
     }
 
-    impl->udpHost = "127.0.0.1";
-    const char *host_ip = std::getenv("GZ_VIDEO_HOST_IP");
-    if (host_ip) {
-        impl->udpHost = std::string(host_ip);
-    } else if (_sdf->HasElement("udpHost")) {
-        impl->udpHost = _sdf->Get<std::string>("udpHost");
+    if (_sdf->HasElement("udp_host"))
+    {
+        impl->udpHost = _sdf->Get<std::string>("udp_host");
     }
 
-    impl->udpPort = 5600;
-    const char *host_port = std::getenv("GZ_VIDEO_HOST_PORT");
-    if (host_port) {
-        sscanf(host_port, "%d", &impl->udpPort);
-    } else if (_sdf->HasElement("udpPort")) {
-        impl->udpPort = _sdf->Get<int>("udpPort");
+    if (_sdf->HasElement("udp_port"))
+    {
+        impl->udpPort = _sdf->Get<int>("udp_port");
     }
-    gzwarn << "Streaming video to " << impl->udpHost << ":" << impl->udpPort << std::endl;
+    gzmsg << "Streaming video to " << impl->udpHost << ":"
+          << impl->udpPort << std::endl;
 
-    // uses MPEG2TS pipeline by default. RTMP and Generic are mutually exclusive with priority to RTMP
-    if (_sdf->HasElement("rtmpLocation")) {
-        impl->rtmpLocation = _sdf->Get<std::string>("rtmpLocation");
+    // uses MPEG2TS pipeline by default. RTMP and Generic are
+    // mutually exclusive with priority to RTMP
+    if (_sdf->HasElement("rtmp_location"))
+    {
+        impl->rtmpLocation = _sdf->Get<std::string>("rtmp_location");
         impl->useRtmpPipeline = true;
 
-    } else if (_sdf->HasElement("useBasicPipeline")) {
-        impl->useBasicPipeline = _sdf->Get<bool>("useBasicPipeline");
+    } else if (_sdf->HasElement("use_basic_pipeline"))
+    {
+        impl->useBasicPipeline = _sdf->Get<bool>("use_basic_pipeline");
     }
 
     // Use CUDA for video encoding
-    if (_sdf->HasElement("useCuda")) {
-        impl->useCuda = _sdf->Get<bool>("useCuda");
-    } else {
-        impl->useCuda = false;
+    if (_sdf->HasElement("use_cuda"))
+    {
+        impl->useCuda = _sdf->Get<bool>("use_cuda");
     }
 
-    impl->imageTopic = "/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitch_link/sensor/camera/image";
-    const char *image_topic = std::getenv("GZ_VIDEO_TOPIC");
-    if (image_topic) {
-        impl->imageTopic = std::string(image_topic);
-    } else if (_sdf->HasElement("imageTopic")) {
-        impl->imageTopic = _sdf->Get<std::string>("imageTopic");
+    if (!_sdf->HasElement("image_topic"))
+    {
+        gzerr << "Missing required parameter: <image_topic>" << std::endl;
+        return;
     }
+    impl->imageTopic = _sdf->Get<std::string>("image_topic");
 
-    impl->enableTopic = "/enable_video_stream";
-    const char *enable_topic = std::getenv("GZ_ENABLE_TOPIC");
-    if (enable_topic) {
-        impl->enableTopic = std::string(enable_topic);
-    } else if (_sdf->HasElement("enableTopic")) {
-        impl->enableTopic = _sdf->Get<std::string>("enableTopic");
+    if (!_sdf->HasElement("enable_topic"))
+    {
+        gzerr << "Missing required parameter: <enable_topic>" << std::endl;
+        return;
     }
+    impl->enableTopic = _sdf->Get<std::string>("enable_topic");
 
     // subscribe to gazebo topics
-    impl->node.Subscribe(impl->enableTopic, &GstCameraPlugin::Impl::onVideoStreamEnable, impl.get());
-    impl->node.Subscribe(impl->imageTopic, &GstCameraPlugin::Impl::onImage, impl.get());
+    impl->node.Subscribe(impl->enableTopic,
+        &GstCameraPlugin::Impl::onVideoStreamEnable, impl.get());
+    impl->node.Subscribe(impl->imageTopic,
+        &GstCameraPlugin::Impl::onImage, impl.get());
 
     // subscribe to events
-    impl->connections.push_back(_eventMgr.Connect<gz::sim::events::RenderTeardown>(
-        std::bind(&GstCameraPlugin::Impl::OnRenderTeardown, impl.get())));
+    impl->connections.push_back(
+        _eventMgr.Connect<gz::sim::events::RenderTeardown>(
+            std::bind(&GstCameraPlugin::Impl::OnRenderTeardown, impl.get())));
 }
 
-void GstCameraPlugin::PreUpdate(const UpdateInfo &_info, EntityComponentManager &_ecm) {
-    if (impl->cameraName.empty()) {
+void GstCameraPlugin::PreUpdate(const UpdateInfo &_info,
+    EntityComponentManager &_ecm)
+{
+    if (impl->cameraName.empty())
+    {
         Entity cameraEntity = impl->parentSensor;
-        impl->cameraName = removeParentScope(scopedName(cameraEntity, _ecm, "::", false), "::");
+        impl->cameraName = removeParentScope(
+            scopedName(cameraEntity, _ecm, "::", false), "::");
         gzwarn << "Camera name: [" << impl->cameraName << "]" << std::endl;
     }
 
-    if (!impl->camera && !impl->cameraName.empty()) {
+    if (!impl->camera && !impl->cameraName.empty())
+    {
         impl->initializeCamera();
         return;
     }
 }
 
-void GstCameraPlugin::Impl::initializeCamera() {
+void GstCameraPlugin::Impl::initializeCamera()
+{
     // Wait for render engine to be available.
     if (rendering::loadedEngines().empty()) return;
 
     // Get scene.
-    if (!scene) {
+    if (!scene)
+    {
         scene = rendering::sceneFromFirstRenderEngine();
     }
 
     // Return if scene not ready or no sensors available.
-    if (scene == nullptr || !scene->IsInitialized() || scene->SensorCount() == 0) {
+    if (scene == nullptr || !scene->IsInitialized()
+        || scene->SensorCount() == 0)
+    {
         gzwarn << "No scene or camera sensors available" << std::endl;
         return;
     }
 
     // Get camera.
-    if (!camera) {
+    if (!camera)
+    {
         auto sensor = scene->SensorByName(cameraName);
-        if (!sensor) {
-            gzerr << "Unable to find sensor: [" << cameraName << "]" << std::endl;
+        if (!sensor)
+        {
+            gzerr << "Unable to find sensor: [" << cameraName << "]"
+                  << std::endl;
             return;
         }
 
         camera = std::dynamic_pointer_cast<rendering::Camera>(sensor);
-        if (!camera) {
+        if (!camera)
+        {
             gzerr << "[" << cameraName << "] is not a camera" << std::endl;
             return;
         }
     }
 }
 
-void GstCameraPlugin::Impl::startStreaming() {
-    if (!isGstMainLoopActive) {
+void GstCameraPlugin::Impl::startStreaming()
+{
+    if (!isGstMainLoopActive)
+    {
         pthread_create(&threadId, NULL, start_thread, this);
     }
 }
 
-void *GstCameraPlugin::Impl::start_thread(void *param) {
+void *GstCameraPlugin::Impl::start_thread(void *param)
+{
     GstCameraPlugin::Impl *impl = (GstCameraPlugin::Impl *)param;
     impl->startGstThread();
+    //! @todo why are we returning a nullptr? 
     return nullptr;
 }
 
-void GstCameraPlugin::Impl::startGstThread() {
+void GstCameraPlugin::Impl::startGstThread()
+{
     gst_init(nullptr, nullptr);
 
     gst_loop = g_main_loop_new(nullptr, FALSE);
-    if (!gst_loop) {
+    if (!gst_loop)
+    {
         gzerr << "Create loop failed" << std::endl;
         return;
     }
 
     GstElement *pipeline = gst_pipeline_new(nullptr);
-    if (!pipeline) {
+    if (!pipeline)
+    {
         gzerr << "ERR: Create pipeline failed" << std::endl;
         return;
     }
 
     source = gst_element_factory_make("appsrc", nullptr);
-    if (useRtmpPipeline) {
+    if (useRtmpPipeline)
+    {
         createRtmpPipeline(pipeline);
-    } else if (useBasicPipeline) {
+    }
+    else if (useBasicPipeline)
+    {
         createGenericPipeline(pipeline);
-    } else {
+    }
+    else
+    {
         createMpeg2tsPipeline(pipeline);
     }
 
     // Configure source element
     g_object_set(G_OBJECT(source), "caps",
-                 gst_caps_new_simple("video/x-raw",
-                                     "format", G_TYPE_STRING, "I420",
-                                     "width", G_TYPE_INT, width,
-                                     "height", G_TYPE_INT, height,
-                                     "framerate", GST_TYPE_FRACTION, (unsigned int)rate, 1, nullptr),
+        gst_caps_new_simple("video/x-raw",
+                            "format", G_TYPE_STRING, "I420",
+                            "width", G_TYPE_INT, width,
+                            "height", G_TYPE_INT, height,
+                            "framerate", GST_TYPE_FRACTION,
+                            (unsigned int)rate, 1, nullptr),
                  "is-live", TRUE,
                  "do-timestamp", TRUE,
                  "stream-type", GST_APP_STREAM_TYPE_STREAM,
@@ -282,7 +320,8 @@ void GstCameraPlugin::Impl::startGstThread() {
 
     // Start
     auto ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    if (ret != GST_STATE_CHANGE_SUCCESS) {
+    if (ret != GST_STATE_CHANGE_SUCCESS)
+    {
         gzwarn << "State change result: " << ret << std::endl;
     }
 
@@ -303,7 +342,8 @@ void GstCameraPlugin::Impl::startGstThread() {
     source = nullptr;
 }
 
-void GstCameraPlugin::Impl::createRtmpPipeline(GstElement *pipeline) {
+void GstCameraPlugin::Impl::createRtmpPipeline(GstElement *pipeline)
+{
     gzdbg << "Creating RTMP pipeline" << std::endl;
     GstElement *queue = gst_element_factory_make("queue", nullptr);
     GstElement *converter = gst_element_factory_make("videoconvert", nullptr);
@@ -313,22 +353,27 @@ void GstCameraPlugin::Impl::createRtmpPipeline(GstElement *pipeline) {
 
     g_object_set(G_OBJECT(sink), "location", rtmpLocation.c_str(), nullptr);
 
-    if (!source || !queue || !converter || !encoder || !payloader || !sink) {
+    if (!source || !queue || !converter || !encoder || !payloader || !sink)
+    {
         gzerr << "ERR: Create elements failed" << std::endl;
         return;
     }
 
     // Connect all elements to pipeline
-    gst_bin_add_many(GST_BIN(pipeline), source, queue, converter, encoder, payloader, sink, nullptr);
+    gst_bin_add_many(GST_BIN(pipeline), source, queue, converter, encoder,
+        payloader, sink, nullptr);
 
     // Link all elements
-    if (gst_element_link_many(source, queue, converter, encoder, payloader, sink, nullptr) != TRUE) {
+    if (gst_element_link_many(source, queue, converter, encoder,
+        payloader, sink, nullptr) != TRUE)
+    {
         gzerr << "ERR: Link elements failed" << std::endl;
         return;
     }
 }
 
-void GstCameraPlugin::Impl::createGenericPipeline(GstElement *pipeline) {
+void GstCameraPlugin::Impl::createGenericPipeline(GstElement *pipeline)
+{
     gzdbg << "Creating Generic pipeline" << std::endl;
     GstElement *queue = gst_element_factory_make("queue", nullptr);
     GstElement *converter = gst_element_factory_make("videoconvert", nullptr);
@@ -336,24 +381,30 @@ void GstCameraPlugin::Impl::createGenericPipeline(GstElement *pipeline) {
     GstElement *payloader = gst_element_factory_make("rtph264pay", nullptr);
     GstElement *sink = gst_element_factory_make("udpsink", nullptr);
 
-    g_object_set(G_OBJECT(sink), "host", udpHost.c_str(), "port", udpPort, nullptr);
+    g_object_set(G_OBJECT(sink), "host", udpHost.c_str(),
+        "port", udpPort, nullptr);
 
-    if (!source || !queue || !converter || !encoder || !payloader || !sink) {
+    if (!source || !queue || !converter || !encoder || !payloader || !sink)
+    {
         gzerr << "ERR: Create elements failed" << std::endl;
         return;
     }
 
     // Connect all elements to pipeline
-    gst_bin_add_many(GST_BIN(pipeline), source, queue, converter, encoder, payloader, sink, nullptr);
+    gst_bin_add_many(GST_BIN(pipeline), source, queue, converter, encoder,
+        payloader, sink, nullptr);
 
     // Link all elements
-    if (gst_element_link_many(source, queue, converter, encoder, payloader, sink, nullptr) != TRUE) {
+    if (gst_element_link_many(source, queue, converter, encoder,
+        payloader, sink, nullptr) != TRUE)
+    {
         gzerr << "ERR: Link elements failed" << std::endl;
         return;
     }
 }
 
-void GstCameraPlugin::Impl::createMpeg2tsPipeline(GstElement *pipeline) {
+void GstCameraPlugin::Impl::createMpeg2tsPipeline(GstElement *pipeline)
+{
     gzdbg << "Creating MPEG2TS pipeline" << std::endl;
     GstElement *queue = gst_element_factory_make("queue", nullptr);
     GstElement *converter = gst_element_factory_make("videoconvert", nullptr);
@@ -364,35 +415,48 @@ void GstCameraPlugin::Impl::createMpeg2tsPipeline(GstElement *pipeline) {
     GstElement *sink = gst_element_factory_make("udpsink", nullptr);
 
     g_object_set(G_OBJECT(payloader), "alignment", 7, nullptr);
-    g_object_set(G_OBJECT(sink), "host", udpHost.c_str(), "port", udpPort, "sync", false, nullptr);
+    g_object_set(G_OBJECT(sink), "host", udpHost.c_str(), "port", udpPort,
+        "sync", false, nullptr);
 
-    if (!source || !queue || !converter || !encoder || !h264_parser || !payloader || !queue_mpeg || !sink) {
+    if (!source || !queue || !converter || !encoder || !h264_parser
+        || !payloader || !queue_mpeg || !sink)
+    {
         gzerr << "ERR: Create elements failed" << std::endl;
         return;
     }
 
-    gst_bin_add_many(GST_BIN(pipeline), source, queue, converter, encoder, h264_parser, payloader, queue_mpeg, sink, nullptr);
-    if (gst_element_link_many(source, queue, converter, encoder, h264_parser, payloader, queue_mpeg, sink, nullptr) != TRUE) {
+    gst_bin_add_many(GST_BIN(pipeline), source, queue, converter, encoder,
+        h264_parser, payloader, queue_mpeg, sink, nullptr);
+    if (gst_element_link_many(source, queue, converter, encoder,
+        h264_parser, payloader, queue_mpeg, sink, nullptr) != TRUE)
+    {
         gzerr << "ERR: Link elements failed" << std::endl;
         return;
     }
 }
 
-GstElement* GstCameraPlugin::Impl::createEncoder() {
+GstElement* GstCameraPlugin::Impl::createEncoder()
+{
     GstElement* encoder;
-    if (useCuda) {
+    if (useCuda)
+    {
         gzdbg << "Using Cuda" << std::endl;
         encoder = gst_element_factory_make("nvh264enc", nullptr);
         g_object_set(G_OBJECT(encoder), "bitrate", 800, "preset", 1, nullptr);
-    } else {
+    }
+    else
+    {
         encoder = gst_element_factory_make("x264enc", nullptr);
-        g_object_set(G_OBJECT(encoder), "bitrate", 800, "speed-preset", 6, "tune", 4, "key-int-max", 10, nullptr);
+        g_object_set(G_OBJECT(encoder), "bitrate", 800, "speed-preset", 6,
+            "tune", 4, "key-int-max", 10, nullptr);
     }
     return encoder;
 }
 
-void GstCameraPlugin::Impl::onImage(const msgs::Image &msg) {
-    if (!requestedStartStreaming) {
+void GstCameraPlugin::Impl::onImage(const msgs::Image &msg)
+{
+    if (!requestedStartStreaming)
+    {
         requestedStartStreaming = true;
         width = msg.width();
         height = msg.height();
@@ -406,14 +470,16 @@ void GstCameraPlugin::Impl::onImage(const msgs::Image &msg) {
     const guint size = width * height * 1.5;
     GstBuffer *buffer = gst_buffer_new_allocate(NULL, size, NULL);
 
-    if (!buffer) {
+    if (!buffer)
+    {
         gzerr << "gst_buffer_new_allocate failed" << std::endl;
         return;
     }
 
     GstMapInfo map;
 
-    if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+    if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE))
+    {
         gzerr << "gst_buffer_map failed" << std::endl;
         return;
     }
@@ -427,20 +493,24 @@ void GstCameraPlugin::Impl::onImage(const msgs::Image &msg) {
     memcpy(map.data, frameYUV.data, size);
     gst_buffer_unmap(buffer, &map);
 
-    GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(this->source), buffer);
-    if (ret != GST_FLOW_OK) {
+    GstFlowReturn ret =
+        gst_app_src_push_buffer(GST_APP_SRC(this->source), buffer);
+    if (ret != GST_FLOW_OK)
+    {
         /* something wrong, stop pushing */
         gzerr << "gst_app_src_push_buffer failed" << std::endl;
         g_main_loop_quit(gst_loop);
     }
 }
 
-void GstCameraPlugin::Impl::onVideoStreamEnable(const msgs::Boolean &msg) {
+void GstCameraPlugin::Impl::onVideoStreamEnable(const msgs::Boolean &msg)
+{
     gzwarn << "VideoStreamEnable: " << msg.data() << std::endl;
     msg.data() ? startStreaming() : stopStreaming();
 }
 
-void GstCameraPlugin::Impl::OnRenderTeardown() {
+void GstCameraPlugin::Impl::OnRenderTeardown()
+{
     gzdbg << "onRenderTeardown" << std::endl;
 
     camera.reset();
@@ -448,8 +518,10 @@ void GstCameraPlugin::Impl::OnRenderTeardown() {
     stopStreaming();
 }
 
-void GstCameraPlugin::Impl::stopStreaming() {
-    if (isGstMainLoopActive) {
+void GstCameraPlugin::Impl::stopStreaming()
+{
+    if (isGstMainLoopActive)
+    {
         stopGstThread();
 
         pthread_join(threadId, NULL);
@@ -457,8 +529,10 @@ void GstCameraPlugin::Impl::stopStreaming() {
     }
 }
 
-void GstCameraPlugin::Impl::stopGstThread() {
-    if (gst_loop) {
+void GstCameraPlugin::Impl::stopGstThread()
+{
+    if (gst_loop)
+    {
         g_main_loop_quit(gst_loop);
     }
 }
